@@ -66,7 +66,7 @@ fn main() {
         cargo: Version {
             number: (0, 20, 0),
             date: NaiveDate::from_ymd(2017, 5, 12),
-            revision: "615565363".to_string(),
+            revision: "13d92c64d".to_string(),
         },
         rust: Version {
             number: (1, 19, 0),
