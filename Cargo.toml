@@ -1,0 +1,13 @@
+[package]
+name = "sunrise"
+version = "0.1.0"
+authors = ["Jon Gjengset <jon@thesquareplanet.com>"]
+
+[dependencies]
+egg-mode = "0.8.1"
+hyper = "0.10.10"
+hyper-native-tls = "0.2.2"
+regex = "0.2.1"
+chrono = "0.3.1"
+serde = "1.0"
+toml = "0.4"
