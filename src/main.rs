@@ -41,6 +41,10 @@ fn main() {
         .version(crate_version!())
         .author("Jon Gjengset <jon@thesqsuareplanet.com>")
         .about("Tweets information about newest Rust Nightly to @rust_at_sunrise")
+        .arg(Arg::with_name("dry")
+                 .help("Do a dry run which does not loop or post to twitter")
+                 .short("d")
+                 .long("dry-run"))
         .arg(Arg::with_name("RUSTV")
                  .help("Last rust nightly version string")
                  .required(true)
@@ -65,22 +69,27 @@ fn main() {
           "rev" => &last.cargo.revision,
           "date" => %last.cargo.date);
 
-    // we need twitter access
-    info!(log, "authenticating with twitter");
-    let con_secret = env::var("CONSUMER_SECRET").unwrap();
-    let access_secret = env::var("ACCESS_TOKEN_SECRET").unwrap();
-    let con_token = egg_mode::KeyPair::new(CONSUMER_KEY, con_secret);
-    let access_token = egg_mode::KeyPair::new(ACCESS_TOKEN, access_secret);
-    let token = egg_mode::Token::Access {
-        consumer: con_token,
-        access: access_token,
-    };
-    let config = match egg_mode::service::config(&token) {
-        Ok(c) => c,
-        Err(e) => {
-            crit!(log, "failed to get twitter config: {}", e);
-            return;
-        }
+    let twitter = if matches.is_present("dry") {
+        None
+    } else {
+        // we need twitter access
+        info!(log, "authenticating with twitter");
+        let con_secret = env::var("CONSUMER_SECRET").unwrap();
+        let access_secret = env::var("ACCESS_TOKEN_SECRET").unwrap();
+        let con_token = egg_mode::KeyPair::new(CONSUMER_KEY, con_secret);
+        let access_token = egg_mode::KeyPair::new(ACCESS_TOKEN, access_secret);
+        let token = egg_mode::Token::Access {
+            consumer: con_token,
+            access: access_token,
+        };
+        let config = match egg_mode::service::config(&token) {
+            Ok(c) => c,
+            Err(e) => {
+                crit!(log, "failed to get twitter config: {}", e);
+                return;
+            }
+        };
+        Some((token, config))
     };
 
     // and then we loop
@@ -92,21 +101,26 @@ fn main() {
                     let tweet = new_nightly(&log, &nightly, &last);
                     last = nightly;
 
-                    match egg_mode::text::character_count(&*tweet,
-                                                          config.short_url_length,
-                                                          config.short_url_length_https) {
-                        (chars, true) => {
-                            info!(log, "tweeting"; "chars" => chars);
-                            println!("{}", tweet);
+                    if let Some((ref token, ref config)) = twitter {
+                        match egg_mode::text::character_count(&*tweet,
+                                                              config.short_url_length,
+                                                              config.short_url_length_https) {
+                            (chars, true) => {
+                                info!(log, "tweeting"; "chars" => chars);
+                                println!("{}", tweet);
 
-                            let draft = DraftTweet::new(&*tweet);
-                            if let Err(e) = draft.send(&token) {
-                                error!(log, "could not tweet: {}", e);
+                                let draft = DraftTweet::new(&*tweet);
+                                if let Err(e) = draft.send(&token) {
+                                    error!(log, "could not tweet: {}", e);
+                                }
+                            }
+                            (chars, false) => {
+                                error!(log, "tweet is too long"; "chars" => chars);
                             }
                         }
-                        (chars, false) => {
-                            error!(log, "tweet is too long"; "chars" => chars);
-                        }
+                    } else {
+                        info!(log, "would have tweeted:");
+                        println!("{}", tweet);
                     }
                 } else {
                     debug!(log, "nightly did not change"; "current" => %nightly.rust.date);
@@ -117,6 +131,10 @@ fn main() {
             }
         }
 
+        if matches.is_present("dry") {
+            warn!(log, "exiting early since we're doing a dry run");
+            break;
+        }
         thread::sleep(time::Duration::from_secs(30 * 60));
     }
 }
