@@ -4,13 +4,16 @@ extern crate chrono;
 extern crate regex;
 extern crate hyper;
 extern crate serde;
+#[macro_use]
+extern crate serde_derive;
 extern crate toml;
 #[macro_use]
 extern crate clap;
 #[macro_use]
 extern crate slog;
 extern crate slog_term;
-
+extern crate rustc_perf;
+extern crate serde_json;
 
 use std::thread;
 use std::sync;
@@ -21,12 +24,15 @@ use std::io;
 use std::io::prelude::*;
 
 use chrono::naive::date::NaiveDate;
+use chrono::offset::utc::UTC;
+use chrono::date::Date;
 use egg_mode::tweet::DraftTweet;
 use clap::{Arg, App};
 
 const CONSUMER_KEY: &'static str = "XurcamcbIvruiowuIuLLxpkEV";
 const ACCESS_TOKEN: &'static str = "864346480437469185-itNALA4j82KEdvYg8Mh1XLZoYdHTiLK";
 const NIGHTLY_MANIFEST: &'static str = "https://static.rust-lang.org/dist/channel-rust-nightly.toml";
+const PERF_ENDPOINT: &'static str = "http://perf.rust-lang.org/perf/get";
 
 fn main() {
     // we want to log things
@@ -59,6 +65,7 @@ fn main() {
     let mut last = Nightly {
         rust: Version::from_str(matches.value_of("RUSTV").unwrap()).unwrap(),
         cargo: Version::from_str(matches.value_of("CARGOV").unwrap()).unwrap(),
+        perf: None,
     };
     info!(log, "last rust nightly";
           "version" => %last.rust.number,
@@ -95,9 +102,10 @@ fn main() {
     // and then we loop
     loop {
         match nightly() {
-            Ok(nightly) => {
+            Ok(mut nightly) => {
                 // did nightly change?
                 if nightly.rust.revision != last.rust.revision {
+                    fill_perf(&log, &mut nightly, &last);
                     let tweet = new_nightly(&log, &nightly, &last);
                     last = nightly;
 
@@ -139,6 +147,105 @@ fn main() {
     }
 }
 
+// workaround for https://github.com/rust-lang-nursery/rustc-perf/pull/133
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Recording {
+    time: f64,
+    rss: u64,
+}
+
+fn fill_perf(log: &slog::Logger, new: &mut Nightly, old: &Nightly) {
+    // we want tls
+    let ssl = hyper_native_tls::NativeTlsClient::new().unwrap();
+    let connector = hyper::net::HttpsConnector::new(ssl);
+    let client = hyper::Client::with_connector(connector);
+
+    // get perf info
+    let perf_req = rustc_perf::api::days::Request {
+        // date_a searches for first following test, and falls back to first sample
+        // XXX: which is really weird btw...
+        // see rustc_perf::util::get_commit_data_from_start
+        date_a: rustc_perf::date::OptionalDate::new(old.rust.date.and_hms(23, 59, 59).into()),
+        // date_a searches for first following test, and falls back to last sample
+        // see rustc_perf::util::get_commit_data_from_start
+        date_b: rustc_perf::date::OptionalDate::new(new.rust.date.and_hms(23, 59, 59).into()),
+        group_by: rustc_perf::server::GroupBy::Crate,
+        crates: rustc_perf::api::List::All,
+        phases: rustc_perf::api::List::All,
+    };
+    let req = serde_json::to_string(&perf_req).unwrap();
+    let req = hyper::client::Body::BufBody(req.as_bytes(), req.as_bytes().len());
+
+    match client.post(PERF_ENDPOINT).body(req).send() {
+        Err(e) => {
+            error!(log, "failed to get perf data: {}", e);
+        }
+        Ok(res) => {
+            if res.status != hyper::Ok {
+                error!(log, "perf did not give 200 OK"; "gave" => %res.status);
+                return;
+            }
+
+            match serde_json::from_reader(res) {
+                Ok(res) => {
+                    let res: rustc_perf::api::days::Response = res;
+                    // res.a is first benchmark following old
+                    // res.b is first benchmark following new
+                    // note that they will both be for the day *following* the date of the nightly
+                    if res.a.date.0.date() != old.rust.date.succ() {
+                        error!(log, "old perf benchmark not found";
+                                "needed" => %old.rust.date,
+                                "found" => %res.a.date.0.date());
+                        return;
+                    }
+                    if res.b.date.0.date() != new.rust.date.succ() {
+                        error!(log, "new perf benchmark not found";
+                                "needed" => %new.rust.date,
+                                "found" => %res.b.date.0.date());
+                        return;
+                    }
+
+                    debug!(log, "comparing perf results";
+                           "old" => res.a.commit,
+                           "new" => res.b.commit);
+
+                    // we want to compute the average improvement in time + rss
+                    let mut time_imp = 0f64;
+                    let mut rss_imp = 0f64;
+                    let mut n = 0;
+                    for (crt, newrec) in &res.b.data {
+                        use std::mem;
+                        let newrec: &Recording = unsafe { mem::transmute(newrec) };
+                        if let Some(oldrec) = res.a.data.get(crt) {
+                            let oldrec: &Recording = unsafe { mem::transmute(oldrec) };
+                            time_imp += (newrec.time - oldrec.time) / oldrec.time;
+                            rss_imp += (newrec.rss as f64 - oldrec.rss as f64) / oldrec.rss as f64;
+                            n += 1;
+                        }
+                    }
+
+                    time_imp *= 100f64;
+                    time_imp /= n as f64;
+                    rss_imp *= 100f64;
+                    rss_imp /= n as f64;
+                    info!(log, "perf improvements";
+                          "time" => format!("{:.1}%", time_imp),
+                          "rss" => format!("{:.1}%", rss_imp));
+
+                    new.perf = Some(PerfChange {
+                                        time: time_imp,
+                                        rss: rss_imp,
+                                    });
+                }
+                Err(e) => {
+                    error!(log, "malformed response from perf: {}", e);
+                }
+            }
+        }
+    }
+}
+
+
 /// Construct a tweet based on information about old and new nightly
 fn new_nightly(log: &slog::Logger, new: &Nightly, old: &Nightly) -> String {
     warn!(log, "new rust release detected";
@@ -150,8 +257,8 @@ fn new_nightly(log: &slog::Logger, new: &Nightly, old: &Nightly) -> String {
     let changes = format!("https://github.com/rust-lang/rust/compare/{}...{}",
                           old.rust.revision,
                           new.rust.revision);
-    let mut desc = format!("{} nightly has been released.\n", new.rust.date);
-    desc.push_str(&format!("Changes in Rust: {}", changes));
+    let mut desc = format!("{} nightly released\n", new.rust.date.naive_utc());
+    desc.push_str(&format!("rust diff: {}", changes));
 
     // did cargo also change?
     if new.cargo.revision != old.cargo.revision {
@@ -165,9 +272,12 @@ fn new_nightly(log: &slog::Logger, new: &Nightly, old: &Nightly) -> String {
         let changes = format!("https://github.com/rust-lang/cargo/compare/{}...{}",
                               old.cargo.revision,
                               new.cargo.revision);
-        desc.push_str(&format!("\nChanges in Cargo: {}", changes));
+        desc.push_str(&format!("\ncargo diff {}", changes));
     }
 
+    if let Some(ref perf) = new.perf {
+        desc.push_str(&format!("\nperf {}: http://perf.rust-lang.org/graphs.html", perf));
+    }
     desc
 }
 
@@ -226,7 +336,11 @@ fn nightly() -> Result<Nightly, ManifestError> {
     let rust = Version::from_str(rust)
         .map_err(|_| ManifestError::BadManifest("rust had weird version"))?;
 
-    Ok(Nightly { cargo, rust })
+    Ok(Nightly {
+           cargo,
+           rust,
+           perf: None,
+       })
 }
 
 enum ManifestError {
@@ -260,7 +374,7 @@ impl fmt::Display for VersionNumber {
 struct Version {
     number: VersionNumber,
     revision: String,
-    date: NaiveDate,
+    date: Date<UTC>,
 }
 
 use std::str::FromStr;
@@ -278,12 +392,34 @@ impl FromStr for Version {
                                      usize::from_str(&matches[3]).unwrap(),
                                      usize::from_str(&matches[4]).unwrap()),
                revision: matches[5].to_string(),
-               date: NaiveDate::parse_from_str(&matches[6], "%Y-%m-%d").unwrap(),
+               date: Date::from_utc(NaiveDate::parse_from_str(&matches[6], "%Y-%m-%d").unwrap(),
+                                    UTC),
            })
+    }
+}
+
+struct PerfChange {
+    time: f64,
+    #[allow(dead_code)]
+    rss: f64,
+}
+
+impl fmt::Display for PerfChange {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        if self.time == 0f64 {
+            write!(f, "unchanged")
+        } else if self.time > 0f64 {
+            // positive means compile time went *up*
+            // which means speed (⚡) went down
+            write!(f, "down {:.1}%", self.time)
+        } else {
+            write!(f, "up {:.1}%", -self.time)
+        }
     }
 }
 
 struct Nightly {
     cargo: Version,
     rust: Version,
+    perf: Option<PerfChange>,
 }
