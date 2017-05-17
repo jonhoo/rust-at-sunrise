@@ -147,13 +147,6 @@ fn main() {
     }
 }
 
-// workaround for https://github.com/rust-lang-nursery/rustc-perf/pull/133
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Recording {
-    time: f64,
-    rss: u64,
-}
-
 fn fill_perf(log: &slog::Logger, new: &mut Nightly, old: &Nightly) {
     // we want tls
     let ssl = hyper_native_tls::NativeTlsClient::new().unwrap();
@@ -214,10 +207,7 @@ fn fill_perf(log: &slog::Logger, new: &mut Nightly, old: &Nightly) {
                     let mut rss_imp = 0f64;
                     let mut n = 0;
                     for (crt, newrec) in &res.b.data {
-                        use std::mem;
-                        let newrec: &Recording = unsafe { mem::transmute(newrec) };
                         if let Some(oldrec) = res.a.data.get(crt) {
-                            let oldrec: &Recording = unsafe { mem::transmute(oldrec) };
                             time_imp += (newrec.time - oldrec.time) / oldrec.time;
                             rss_imp += (newrec.rss as f64 - oldrec.rss as f64) / oldrec.rss as f64;
                             n += 1;
