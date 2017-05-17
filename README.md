@@ -18,3 +18,7 @@ correctly generate the GitHub URLs. Run with:
 $ env CONSUMER_SECRET=... ACCESS_TOKEN_SECRET=... \
   cargo run (rustc +nightly --version) (cargo +nightly --version)
 ```
+
+Note that `sunrise` currently needs a nightly compiler (hah!) due to its
+dependency on
+[`rustc-perf`](https://github.com/rust-lang-nursery/rustc-perf).
