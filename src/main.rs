@@ -250,8 +250,8 @@ fn new_nightly(log: &slog::Logger, new: &Nightly, old: &Nightly) -> String {
     let changes = format!("https://github.com/rust-lang/rust/compare/{}...{}",
                           old.rust.revision,
                           new.rust.revision);
-    let mut desc = format!("{} nightly released\n", new.rust.date.naive_utc());
-    desc.push_str(&format!("rust diff: {}", changes));
+    let mut desc = format!("{} @rustlang nightly is up\n", new.rust.date.naive_utc());
+    desc.push_str(&format!("rust 🔗: {}", changes));
 
     // did cargo also change?
     if new.cargo.revision != old.cargo.revision {
@@ -265,7 +265,7 @@ fn new_nightly(log: &slog::Logger, new: &Nightly, old: &Nightly) -> String {
         let changes = format!("https://github.com/rust-lang/cargo/compare/{}...{}",
                               old.cargo.revision,
                               new.cargo.revision);
-        desc.push_str(&format!("\ncargo diff {}", changes));
+        desc.push_str(&format!("\ncargo 🔗: {}", changes));
     }
 
     if let Some(ref perf) = new.perf {
@@ -404,9 +404,9 @@ impl fmt::Display for PerfChange {
         } else if self.time > 0f64 {
             // positive means compile time went *up*
             // which means speed (⚡) went down
-            write!(f, "down {:.1}%", self.time)
+            write!(f, "📉 {:.1}%", self.time)
         } else {
-            write!(f, "up {:.1}%", -self.time)
+            write!(f, "📈 {:.1}%", -self.time)
         }
     }
 }
