@@ -74,7 +74,7 @@ fn main() {
           "rev" => &last.cargo.revision,
           "date" => %last.cargo.date);
 
-    let twitter = if matches.is_present("dry") {
+    let twitter = if matches.is_present("dry") && env::var("CONSUMER_SECRET").is_err() {
         None
     } else {
         // we need twitter access
@@ -87,14 +87,14 @@ fn main() {
             consumer: con_token,
             access: access_token,
         };
-        let config = match egg_mode::service::config(&token) {
-            Ok(c) => c,
+        match egg_mode::service::config(&token) {
+            Ok(c) => Some((token, c)),
+            Err(_) if matches.is_present("dry") => None,
             Err(e) => {
                 crit!(log, "failed to get twitter config: {}", e);
                 return;
             }
-        };
-        Some((token, config))
+        }
     };
 
     // and then we loop
@@ -111,6 +111,10 @@ fn main() {
                         match egg_mode::text::character_count(&*tweet,
                                                               config.short_url_length,
                                                               config.short_url_length_https) {
+                            (chars, true) if matches.is_present("dry") => {
+                                info!(log, "would have tweeted"; "chars" => chars);
+                                println!("{}", tweet);
+                            }
                             (chars, true) => {
                                 info!(log, "tweeting"; "chars" => chars);
                                 println!("{}", tweet);
