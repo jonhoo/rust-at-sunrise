@@ -191,7 +191,8 @@ fn fill_perf(log: &slog::Logger, new: &mut Nightly, old: &Nightly) {
                                 "found" => %res.a.date.0.date());
                         return;
                     }
-                    if res.b.date.0.date() != new.rust.date.succ() {
+                    if res.a.commit == res.b.commit {
+                        // this serves stale results, but it's better than nothing
                         error!(log, "new perf benchmark not found";
                                 "needed" => %new.rust.date,
                                 "found" => %res.b.date.0.date());
