@@ -1,0 +1,16 @@
+[Unit]
+Description=Start Rust at Sunrise bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jon/rust-at-sunrise
+User=jon
+ExecStartPre=/usr/bin/rustup update nightly
+ExecStart=/bin/sh -c 'exec cargo run -- "$(rustc +nightly --version)" "$(cargo +nightly --version)"'
+SyslogIdentifier=sunrise
+EnvironmentFile=/etc/default/sunrise
+StandardOutput=syslog+console
+
+[Install]
+WantedBy=multi-user.target
