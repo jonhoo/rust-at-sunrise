@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/home/jon/rust-at-sunrise
-TimeoutStartSec=60
+TimeoutStartSec=300
 User=jon
 ExecStartPre=/usr/bin/rustup update nightly
 ExecStart=/bin/sh -c 'exec cargo run -- "$(rustc +nightly --version)" "$(cargo +nightly --version)"'
