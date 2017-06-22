@@ -210,7 +210,13 @@ fn fill_perf(log: &slog::Logger, new: &mut Nightly, old: &Nightly) {
                     let mut rss_imp = 0f64;
                     let mut n = 0;
                     for (crt, newrec) in &res.b.data {
+                        if newrec.time == 0.0 || newrec.rss == 0 {
+                            continue;
+                        }
                         if let Some(oldrec) = res.a.data.get(crt) {
+                            if oldrec.time == 0.0 || oldrec.rss == 0 {
+                                continue;
+                            }
                             time_imp += (newrec.time - oldrec.time) / oldrec.time;
                             rss_imp += (newrec.rss as f64 - oldrec.rss as f64) / oldrec.rss as f64;
                             n += 1;
