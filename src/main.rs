@@ -326,7 +326,7 @@ fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old:
                         None => continue,
                         Some(v) => v,
                     };
-                    let v = match v.get("passes") {
+                    let v = match v.get("stats") {
                         None => continue,
                         Some(v) => v,
                     };
@@ -335,10 +335,13 @@ fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old:
                         Some(v) => v,
                     };
                     for v in v {
-                        if let Some(v) = v.get("time") {
-                            if let Some(v) = v.as_f64() {
-                                t += v;
+                        match v.get("name") {
+                            Some(&serde_json::Value::String(ref s)) if s == "cpu-clock" => {
+                                if let Some(v) = v.get("cnt").and_then(|v| v.as_f64()) {
+                                    t += v;
+                                }
                             }
+                            _ => continue,
                         }
                     }
                     ts.insert(benchmark.to_owned(), t);
