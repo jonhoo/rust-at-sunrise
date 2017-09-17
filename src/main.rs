@@ -441,10 +441,7 @@ fn new_nightly(log: &slog::Logger, new: &Nightly, old: &Nightly) -> String {
     }
 
     if let Some(ref perf) = new.perf {
-        desc.push_str(&format!(
-            "\nperf {}: http://perf.rust-lang.org/graphs.html",
-            perf
-        ));
+        desc.push_str(&format!("\nperf {}: http://perf.rust-lang.org/", perf));
     }
     desc
 }
