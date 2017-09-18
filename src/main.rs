@@ -585,9 +585,7 @@ struct PerfChange {
 
 impl fmt::Display for PerfChange {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        if self.time == 0f64 {
-            write!(f, "unchanged")
-        } else if self.time > 0f64 {
+        if self.time > 0f64 {
             // positive means compile time went *up*
             // which means speed (⚡) went down
             write!(f, "📉 {:.1}%", self.time)
