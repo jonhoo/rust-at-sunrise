@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Jon Gjengset <jon@thesquareplanet.com>"]
 
 [dependencies]
-egg-mode = "0.10.0"
+egg-mode = "0.11.0"
 hyper = "0.11.0"
 futures = "0.1.0"
 hyper-tls = "0.1.2"

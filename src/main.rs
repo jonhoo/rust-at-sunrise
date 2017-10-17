@@ -94,7 +94,8 @@ fn main() {
             consumer: con_token,
             access: access_token,
         };
-        match egg_mode::service::config(&token) {
+        let h = core.handle();
+        match core.run(egg_mode::service::config(&token, &h)) {
             Ok(c) => Some((token, c)),
             Err(_) if matches.is_present("dry") => None,
             Err(e) => {
@@ -152,7 +153,8 @@ fn main() {
                                 println!("{}", tweet);
 
                                 let draft = DraftTweet::new(&*tweet);
-                                if let Err(e) = draft.send(&token) {
+                                let h = core.handle();
+                                if let Err(e) = core.run(draft.send(&token, &h)) {
                                     error!(log, "could not tweet: {}", e);
                                 }
                             }
