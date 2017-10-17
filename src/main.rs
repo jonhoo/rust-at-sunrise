@@ -29,7 +29,8 @@ use futures::{Future, Stream};
 
 const CONSUMER_KEY: &'static str = "XurcamcbIvruiowuIuLLxpkEV";
 const ACCESS_TOKEN: &'static str = "864346480437469185-itNALA4j82KEdvYg8Mh1XLZoYdHTiLK";
-const NIGHTLY_MANIFEST: &'static str = "https://static.rust-lang.org/dist/channel-rust-nightly.toml";
+const NIGHTLY_MANIFEST: &'static str =
+    "https://static.rust-lang.org/dist/channel-rust-nightly.toml";
 
 fn main() {
     // we want to log things
@@ -38,14 +39,13 @@ fn main() {
     let drain = slog_term::CompactFormat::new(decorator).build().fuse();
     let drain = sync::Mutex::new(drain).fuse();
     let log = slog::Logger::root(drain, o!());
+    let mut core = tokio_core::reactor::Core::new().unwrap();
 
     // argument parsing
     let matches = App::new("Rust at Sunrise")
         .version(crate_version!())
         .author("Jon Gjengset <jon@thesqsuareplanet.com>")
-        .about(
-            "Tweets information about newest Rust Nightly to @rust_at_sunrise",
-        )
+        .about("Tweets information about newest Rust Nightly to @rust_at_sunrise")
         .arg(
             Arg::with_name("dry")
                 .help("Do a dry run which does not loop or post to twitter")
@@ -507,8 +507,8 @@ fn nightly() -> Result<Nightly, ManifestError> {
         .ok_or(ManifestError::BadManifest("rust version is not a string"))?;
 
     // arrange
-    let cargo = Version::from_str(cargo)
-        .map_err(|_| ManifestError::BadManifest("cargo had weird version"))?;
+    let cargo =
+        Version::from_str(cargo).map_err(|_| ManifestError::BadManifest("cargo had weird version"))?;
     let rust =
         Version::from_str(rust).map_err(|_| ManifestError::BadManifest("rust had weird version"))?;
 
