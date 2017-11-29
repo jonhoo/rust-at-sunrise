@@ -316,10 +316,7 @@ fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old:
                         None => continue,
                         Some(v) => v,
                     };
-                    let v = match v.get(0) {
-                        None => continue,
-                        Some(v) => v,
-                    };
+                    let v = v.get(0).unwrap_or(v);
                     let v = match v.get("runs") {
                         None => continue,
                         Some(v) => v,
