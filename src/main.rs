@@ -14,17 +14,17 @@ extern crate slog;
 extern crate slog_term;
 extern crate toml;
 
-use std::thread;
-use std::sync;
-use std::time;
-use std::fmt;
 use std::env;
+use std::fmt;
 use std::path::Path;
 use std::process::Command;
+use std::sync;
+use std::thread;
+use std::time;
 
 use chrono::prelude::*;
-use egg_mode::tweet::DraftTweet;
 use clap::{App, Arg};
+use egg_mode::tweet::DraftTweet;
 use futures::{Future, Stream};
 
 const CONSUMER_KEY: &'static str = "XurcamcbIvruiowuIuLLxpkEV";
@@ -222,8 +222,8 @@ fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old:
     }
 
     // iterate through the directory
-    use std::fs;
     use std::collections::BTreeMap;
+    use std::fs;
     // filenames are on the form
     // 2017-02-23T16:56:13+00:00-<commit hash>-x86_64-unknown-linux-gnu.json
     // we don't want to parse and insert *all* files, because that'd be quite slow. instead, we
@@ -402,7 +402,6 @@ fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old:
     new.perf = Some(PerfChange { time: time_imp });
 }
 
-
 /// Construct a tweet based on information about old and new nightly
 fn new_nightly(log: &slog::Logger, new: &Nightly, old: &Nightly) -> String {
     warn!(log, "new rust release detected";
@@ -413,8 +412,7 @@ fn new_nightly(log: &slog::Logger, new: &Nightly, old: &Nightly) -> String {
     // put github compare url in tweet
     let changes = format!(
         "https://github.com/rust-lang/rust/compare/{}...{}",
-        old.rust.revision,
-        new.rust.revision
+        old.rust.revision, new.rust.revision
     );
     let mut desc = format!(
         "{} @rustlang nightly is up 🎉\n",
@@ -433,8 +431,7 @@ fn new_nightly(log: &slog::Logger, new: &Nightly, old: &Nightly) -> String {
         // put github compare url for cargo in tweet too
         let changes = format!(
             "https://github.com/rust-lang/cargo/compare/{}...{}",
-            old.cargo.revision,
-            new.cargo.revision
+            old.cargo.revision, new.cargo.revision
         );
         desc.push_str(&format!("\ncargo 🔬: {}", changes));
     }
@@ -506,8 +503,8 @@ fn nightly() -> Result<Nightly, ManifestError> {
         .ok_or(ManifestError::BadManifest("rust version is not a string"))?;
 
     // arrange
-    let cargo =
-        Version::from_str(cargo).map_err(|_| ManifestError::BadManifest("cargo had weird version"))?;
+    let cargo = Version::from_str(cargo)
+        .map_err(|_| ManifestError::BadManifest("cargo had weird version"))?;
     let rust =
         Version::from_str(rust).map_err(|_| ManifestError::BadManifest("rust had weird version"))?;
 
