@@ -267,7 +267,7 @@ fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old:
     }
 
     // find benchmark closest to old and closest to new
-    let closest_to = |d| {
+    let closest_to = |d: DateTime<Utc>| {
         let gt = perfs.range(d..).next();
         let lt = perfs.range(..d).next_back();
         match (lt, gt) {
