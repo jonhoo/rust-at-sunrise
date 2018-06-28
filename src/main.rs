@@ -1,4 +1,5 @@
 extern crate futures;
+extern crate glob;
 extern crate hyper;
 extern crate hyper_tls;
 extern crate tokio_core;
@@ -11,6 +12,7 @@ extern crate regex;
 extern crate serde_json;
 #[macro_use]
 extern crate slog;
+extern crate slog_async;
 extern crate slog_term;
 extern crate toml;
 
@@ -18,7 +20,6 @@ use std::env;
 use std::fmt;
 use std::path::Path;
 use std::process::Command;
-use std::sync;
 use std::thread;
 use std::time;
 
@@ -36,8 +37,8 @@ fn main() {
     // we want to log things
     use slog::Drain;
     let decorator = slog_term::TermDecorator::new().build();
-    let drain = slog_term::CompactFormat::new(decorator).build().fuse();
-    let drain = sync::Mutex::new(drain).fuse();
+    let drain = slog_term::FullFormat::new(decorator).build().fuse();
+    let drain = slog_async::Async::new(drain).build().fuse();
     let log = slog::Logger::root(drain, o!());
     let mut core = tokio_core::reactor::Core::new().unwrap();
 
@@ -134,7 +135,7 @@ fn main() {
             Ok(mut nightly) => {
                 // did nightly change?
                 if nightly.rust.revision != last.rust.revision {
-                    fill_perf(&log, perf, &mut nightly, &last);
+                    fill_perf(&log, perf, &mut nightly, &mut last);
                     let tweet = new_nightly(&log, &nightly, &last);
                     last = nightly;
 
@@ -183,7 +184,7 @@ fn main() {
     }
 }
 
-fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old: &Nightly) {
+fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old: &mut Nightly) {
     // fetch any new timing results
     match Command::new("git")
         .args(&["-C", &*perf.to_string_lossy(), "fetch", "origin"])
@@ -221,78 +222,21 @@ fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old:
         }
     }
 
-    // iterate through the directory
-    use std::collections::BTreeMap;
-    use std::fs;
-    // filenames are on the form
-    // 2017-02-23T16:56:13+00:00-<commit hash>-x86_64-unknown-linux-gnu.json
-    // we don't want to parse and insert *all* files, because that'd be quite slow. instead, we
-    // only consider those that have happened in the two months represented by old and new.
-    let oldm = format!("{}-{:02}-", old.rust.date.year(), old.rust.date.month());
-    let newm = format!("{}-{:02}-", new.rust.date.year(), new.rust.date.month());
-    let newm = if newm == oldm { None } else { Some(newm) };
-    let mut perfs = BTreeMap::new();
-    for path in fs::read_dir(perf.join("times")).unwrap() {
-        let path = match path {
-            Ok(f) => f,
-            Err(_) => continue,
-        };
-        let f = path.file_name();
-        let f = f.to_str().unwrap();
-        if !f.starts_with(&oldm) {
-            if let Some(ref newm) = newm {
-                if !f.starts_with(newm) {
-                    // not in either interesting month
-                    continue;
-                }
-            } else {
-                // not in the one interesting month
-                continue;
-            }
-        }
-        if !f.ends_with("-x86_64-unknown-linux-gnu.json") {
-            // wrong target
-            continue;
-        }
-        // in an interesting month!
-        let (at, _) = f.split_at(25); // get only the timestamp
-        let at = match at.parse::<DateTime<Utc>>() {
-            Ok(d) => d,
-            Err(e) => {
-                warn!(log, "could not parse timing date '{}': {}", at, e);
-                continue;
-            }
-        };
-        perfs.insert(at, perf.join("times").join(f));
-    }
+    // find benchmark results of old one
+    let old_f = perf.join(format!(
+        "times/commit-{}*-x86_64-unknown-linux-gnu.json",
+        old.rust.revision
+    ));
+    let new_f = perf.join(format!(
+        "times/commit-{}*-x86_64-unknown-linux-gnu.json",
+        new.rust.revision
+    ));
 
-    // find benchmark closest to old and closest to new
-    let closest_to = |d: DateTime<Utc>| {
-        let gt = perfs.range(d..).next();
-        let lt = perfs.range(..d).next_back();
-        match (lt, gt) {
-            (Some((_, f)), None) => f,
-            (None, Some((_, f))) => f,
-            (Some((lt_d, lt_f)), Some((gt_d, gt_f))) => {
-                if d.signed_duration_since(*lt_d) < gt_d.signed_duration_since(d) {
-                    // lt is closer
-                    lt_f
-                } else {
-                    gt_f
-                }
-            }
-            (None, None) => {
-                // this means there are no timings, which shouldn't happen
-                crit!(log, "no perf timing information available");
-                unreachable!();
-            }
-        }
-    };
-    let near_old = closest_to(old.rust.date.and_hms(0, 0, 0));
-    let near_new = closest_to(new.rust.date.and_hms(0, 0, 0));
-
-    let reduce = |f| -> Result<_, Box<std::error::Error>> {
+    let reduce = |f: std::path::PathBuf| -> Result<_, Box<std::error::Error>> {
         use std::collections::HashMap;
+        let f = glob::glob(&*f.to_string_lossy())?
+            .next()
+            .ok_or(format!("couldn't find file matching {:?}", f))??;
         let f = std::fs::File::open(f)?;
         let v: serde_json::Value = serde_json::from_reader(f)?;
         let mut ts = HashMap::new();
@@ -351,14 +295,14 @@ fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old:
         Ok((commit, date, ts))
     };
 
-    let perf_old = match reduce(near_old) {
+    let perf_old = match reduce(old_f) {
         Ok(p) => p,
         Err(e) => {
             error!(log, "could not parse old perf data: {}", e);
             return;
         }
     };
-    let perf_new = match reduce(near_new) {
+    let perf_new = match reduce(new_f) {
         Ok(p) => p,
         Err(e) => {
             error!(log, "could not parse new perf data: {}", e);
@@ -367,11 +311,15 @@ fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old:
     };
 
     debug!(log, "comparing old perf results";
-           "ref" => perf_old.0,
+           "ref" => &perf_old.0,
            "date" => perf_old.1.map(|v| format!("{}", v)));
     debug!(log, "with new perf results";
-           "ref" => perf_new.0,
+           "ref" => &perf_new.0,
            "date" => perf_new.1.map(|v| format!("{}", v)));
+
+    // keep track of full revision hash
+    old.rust.revision = perf_old.0.unwrap();
+    new.rust.revision = perf_new.0.unwrap();
 
     // we want to compute the average improvement in time
     let mut time_old = 0f64;
@@ -437,7 +385,10 @@ fn new_nightly(log: &slog::Logger, new: &Nightly, old: &Nightly) -> String {
     }
 
     if let Some(ref perf) = new.perf {
-        desc.push_str(&format!("\nperf {}: http://perf.rust-lang.org/", perf));
+        desc.push_str(&format!(
+            "\nperf {}: https://perf.rust-lang.org/compare.html?start={}&end={}&stat=cpu-clock",
+            perf, old.rust.revision, new.rust.revision
+        ));
     }
     desc
 }
@@ -451,10 +402,11 @@ fn nightly() -> Result<Nightly, ManifestError> {
         .build(&core.handle());
 
     // download
-    let res = core.run(client.request(hyper::Request::new(
-        hyper::Method::Get,
-        NIGHTLY_MANIFEST.parse().unwrap(),
-    ))).map_err(|e| ManifestError::Unavailable(e))?;
+    let res =
+        core.run(client.request(hyper::Request::new(
+            hyper::Method::Get,
+            NIGHTLY_MANIFEST.parse().unwrap(),
+        ))).map_err(|e| ManifestError::Unavailable(e))?;
     if res.status() != hyper::Ok {
         return Err(ManifestError::NotOk(res.status()));
     }
@@ -472,7 +424,8 @@ fn nightly() -> Result<Nightly, ManifestError> {
 
     // parse
     let r: toml::Value = toml::from_str(&*s).map_err(|e| ManifestError::BadToml(e))?;
-    let manifest = r.as_table()
+    let manifest = r
+        .as_table()
         .ok_or(ManifestError::BadManifest("expected table at root"))?;
 
     // traverse
@@ -481,7 +434,8 @@ fn nightly() -> Result<Nightly, ManifestError> {
         .ok_or(ManifestError::BadManifest("no [pkg] section"))?
         .as_table()
         .ok_or(ManifestError::BadManifest("expected [pkg] to be table"))?;
-    let cargo = pkgs.get("cargo")
+    let cargo = pkgs
+        .get("cargo")
         .ok_or(ManifestError::BadManifest("no cargo in [pkg]"))?
         .as_table()
         .ok_or(ManifestError::BadManifest("[cargo] is not a section"))?
@@ -491,7 +445,8 @@ fn nightly() -> Result<Nightly, ManifestError> {
         ))?
         .as_str()
         .ok_or(ManifestError::BadManifest("cargo version is not a string"))?;
-    let rust = pkgs.get("rust")
+    let rust = pkgs
+        .get("rust")
         .ok_or(ManifestError::BadManifest("no rust in [pkg]"))?
         .as_table()
         .ok_or(ManifestError::BadManifest("[rust] is not a section"))?
