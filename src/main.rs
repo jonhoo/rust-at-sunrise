@@ -1,10 +1,8 @@
-extern crate futures;
-extern crate glob;
-extern crate hyper;
-extern crate hyper_tls;
-extern crate tokio_core;
-
 extern crate chrono;
+extern crate egg_mode_text;
+extern crate glob;
+extern crate reqwest;
+extern crate tokio_core;
 #[macro_use]
 extern crate clap;
 extern crate egg_mode;
@@ -26,7 +24,6 @@ use std::time;
 use chrono::prelude::*;
 use clap::{App, Arg};
 use egg_mode::tweet::DraftTweet;
-use futures::{Future, Stream};
 
 const CONSUMER_KEY: &'static str = "XurcamcbIvruiowuIuLLxpkEV";
 const ACCESS_TOKEN: &'static str = "864346480437469185-itNALA4j82KEdvYg8Mh1XLZoYdHTiLK";
@@ -140,16 +137,17 @@ fn main() {
                     last = nightly;
 
                     if let Some((ref token, ref config)) = twitter {
-                        match egg_mode::text::character_count(
+                        let limit = 280;
+                        match egg_mode_text::character_count(
                             &*tweet,
                             config.short_url_length,
                             config.short_url_length_https,
                         ) {
-                            (chars, true) if matches.is_present("dry") => {
+                            chars if chars <= limit && matches.is_present("dry") => {
                                 info!(log, "would have tweeted"; "chars" => chars);
                                 println!("{}", tweet);
                             }
-                            (chars, true) => {
+                            chars if chars <= limit => {
                                 info!(log, "tweeting"; "chars" => chars);
                                 println!("{}", tweet);
 
@@ -159,7 +157,7 @@ fn main() {
                                     error!(log, "could not tweet: {}", e);
                                 }
                             }
-                            (chars, false) => {
+                            chars => {
                                 error!(log, "tweet is too long"; "chars" => chars);
                             }
                         }
@@ -395,32 +393,15 @@ fn new_nightly(log: &slog::Logger, new: &Nightly, old: &Nightly) -> String {
 
 /// Fetch information about the latest Rust nightly
 fn nightly() -> Result<Nightly, ManifestError> {
-    // we want tls
-    let mut core = tokio_core::reactor::Core::new().unwrap();
-    let client = hyper::Client::configure()
-        .connector(hyper_tls::HttpsConnector::new(4, &core.handle()).unwrap())
-        .build(&core.handle());
-
-    // download
-    let res =
-        core.run(client.request(hyper::Request::new(
-            hyper::Method::Get,
-            NIGHTLY_MANIFEST.parse().unwrap(),
-        ))).map_err(|e| ManifestError::Unavailable(e))?;
-    if res.status() != hyper::Ok {
+    let mut res = reqwest::get(NIGHTLY_MANIFEST).map_err(|e| ManifestError::Unavailable(e))?;
+    if res.status() != reqwest::StatusCode::Ok {
         return Err(ManifestError::NotOk(res.status()));
     }
 
     // reader
-    let s = core.run(
-        res.body()
-            .concat2()
-            .map_err(|e| ManifestError::LostConnection(e))
-            .and_then(|s| {
-                String::from_utf8(s.to_vec())
-                    .map_err(|_| ManifestError::BadManifest("invalid utf-8"))
-            }),
-    )?;
+    let s = res
+        .text()
+        .map_err(|_| ManifestError::BadManifest("invalid utf-8"))?;
 
     // parse
     let r: toml::Value = toml::from_str(&*s).map_err(|e| ManifestError::BadToml(e))?;
@@ -471,9 +452,8 @@ fn nightly() -> Result<Nightly, ManifestError> {
 }
 
 enum ManifestError {
-    Unavailable(hyper::error::Error),
-    NotOk(hyper::StatusCode),
-    LostConnection(hyper::Error),
+    Unavailable(reqwest::Error),
+    NotOk(reqwest::StatusCode),
     BadToml(toml::de::Error),
     BadManifest(&'static str),
 }
@@ -483,7 +463,6 @@ impl fmt::Display for ManifestError {
         match *self {
             ManifestError::Unavailable(ref e) => write!(f, "manifest unavailable: {}", e),
             ManifestError::NotOk(ref s) => write!(f, "manifest returned {}", s),
-            ManifestError::LostConnection(ref e) => write!(f, "manifest unreadable: {}", e),
             ManifestError::BadToml(ref e) => write!(f, "manifest not valid toml: {}", e),
             ManifestError::BadManifest(e) => write!(f, "manifest malformed: {}", e),
         }
