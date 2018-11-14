@@ -2,7 +2,7 @@ extern crate chrono;
 extern crate egg_mode_text;
 extern crate glob;
 extern crate reqwest;
-extern crate tokio_core;
+extern crate tokio;
 #[macro_use]
 extern crate clap;
 extern crate egg_mode;
@@ -37,7 +37,6 @@ fn main() {
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
     let drain = slog_async::Async::new(drain).build().fuse();
     let log = slog::Logger::root(drain, o!());
-    let mut core = tokio_core::reactor::Core::new().unwrap();
 
     // argument parsing
     let matches = App::new("Rust at Sunrise")
@@ -79,6 +78,7 @@ fn main() {
           "rev" => &last.cargo.revision,
           "date" => %last.cargo.date);
 
+    let mut rt = tokio::runtime::current_thread::Runtime::new().unwrap();
     let twitter = if matches.is_present("dry") && env::var("CONSUMER_SECRET").is_err() {
         None
     } else {
@@ -92,8 +92,8 @@ fn main() {
             consumer: con_token,
             access: access_token,
         };
-        let h = core.handle();
-        match core.run(egg_mode::service::config(&token, &h)) {
+
+        match rt.block_on(egg_mode::service::config(&token)) {
             Ok(c) => Some((token, c)),
             Err(_) if matches.is_present("dry") => None,
             Err(e) => {
@@ -152,8 +152,7 @@ fn main() {
                                 println!("{}", tweet);
 
                                 let draft = DraftTweet::new(&*tweet);
-                                let h = core.handle();
-                                if let Err(e) = core.run(draft.send(&token, &h)) {
+                                if let Err(e) = rt.block_on(draft.send(&token)) {
                                     error!(log, "could not tweet: {}", e);
                                 }
                             }
@@ -394,7 +393,7 @@ fn new_nightly(log: &slog::Logger, new: &Nightly, old: &Nightly) -> String {
 /// Fetch information about the latest Rust nightly
 fn nightly() -> Result<Nightly, ManifestError> {
     let mut res = reqwest::get(NIGHTLY_MANIFEST).map_err(|e| ManifestError::Unavailable(e))?;
-    if res.status() != reqwest::StatusCode::Ok {
+    if res.status() != reqwest::StatusCode::OK {
         return Err(ManifestError::NotOk(res.status()));
     }
 
@@ -441,8 +440,8 @@ fn nightly() -> Result<Nightly, ManifestError> {
     // arrange
     let cargo = Version::from_str(cargo)
         .map_err(|_| ManifestError::BadManifest("cargo had weird version"))?;
-    let rust =
-        Version::from_str(rust).map_err(|_| ManifestError::BadManifest("rust had weird version"))?;
+    let rust = Version::from_str(rust)
+        .map_err(|_| ManifestError::BadManifest("rust had weird version"))?;
 
     Ok(Nightly {
         cargo,
@@ -492,7 +491,8 @@ impl FromStr for Version {
         use regex::Regex;
         let re = Regex::new(
             r"^(rustc |cargo )?(\d+)\.(\d+)\.(\d+)-nightly \(([0-9a-f]+) (\d{4}-\d{2}-\d{2})\)$",
-        ).unwrap();
+        )
+        .unwrap();
         let matches = re.captures(s).ok_or(())?;
         Ok(Version {
             number: VersionNumber(
