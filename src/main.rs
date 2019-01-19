@@ -311,7 +311,7 @@ fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old:
                 .arg("--since")
                 .arg(&old_date)
                 .arg("-n")
-                .arg("1")
+                .arg("20")
                 .arg("--pretty=")
                 .arg("--")
                 .arg("times/commit-*-x86_64-unknown-linux-gnu.json");
