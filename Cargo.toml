@@ -2,6 +2,7 @@
 name = "sunrise"
 version = "0.1.1"
 authors = ["Jon Gjengset <jon@thesquareplanet.com>"]
+edition = "2018"
 
 [dependencies]
 egg-mode = { git = "https://github.com/QuietMisdreavus/twitter-rs.git" }

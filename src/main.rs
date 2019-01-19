@@ -1,21 +1,11 @@
-extern crate chrono;
-extern crate egg_mode_text;
-extern crate glob;
-extern crate reqwest;
-extern crate tokio;
 #[macro_use]
 extern crate clap;
-extern crate egg_mode;
-extern crate regex;
-extern crate serde_json;
 #[macro_use]
 extern crate slog;
-extern crate slog_async;
-extern crate slog_term;
-extern crate toml;
 
 use std::env;
 use std::fmt;
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::thread;
@@ -229,12 +219,12 @@ fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old:
         new.rust.revision
     ));
 
-    let reduce = |f: std::path::PathBuf| -> Result<_, Box<std::error::Error>> {
+    let reduce = |f: &std::path::Path| -> Result<_, Box<std::error::Error>> {
         use std::collections::HashMap;
-        let f = glob::glob(&*f.to_string_lossy())?
+        let fname = glob::glob(&*f.to_string_lossy())?
             .next()
             .ok_or(format!("couldn't find file matching {:?}", f))??;
-        let f = std::fs::File::open(f)?;
+        let f = std::fs::File::open(&fname)?;
         let v: serde_json::Value = serde_json::from_reader(f)?;
         let mut ts = HashMap::new();
         let (commit, date) = match v.get("commit") {
@@ -289,30 +279,95 @@ fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old:
             }
             None => Err("no benchmark")?,
         }
-        Ok((commit, date, ts))
+        match date {
+            Some(date) => Ok((commit, date, ts, fname)),
+            None => Err("no date stated")?,
+        }
     };
 
-    let perf_old = match reduce(old_f) {
+    let perf_old = match reduce(&old_f) {
         Ok(p) => p,
         Err(e) => {
             error!(log, "could not parse old perf data: {}", e);
             return;
         }
     };
-    let perf_new = match reduce(new_f) {
+    let perf_new = match reduce(&new_f) {
         Ok(p) => p,
         Err(e) => {
-            error!(log, "could not parse new perf data: {}", e);
-            return;
+            // just pick the "latest" one instead.
+            // sadly, we can't rely on file creation/modification time, since git does not maintain
+            // that: https://stackoverflow.com/a/2458146/472927. instead, we walk the git log, and
+            // look for the most recent commit that added a file to `times/`
+            let old_date = format!("{}", perf_old.1);
+            let mut search = Command::new("git");
+            search
+                .arg("-C")
+                .arg(&perf)
+                .arg("show")
+                .arg("--name-only")
+                .arg("--grep")
+                .arg("success")
+                .arg("--since")
+                .arg(&old_date)
+                .arg("-n")
+                .arg("1")
+                .arg("--pretty=")
+                .arg("--")
+                .arg("times/commit-*-x86_64-unknown-linux-gnu.json");
+
+            let file = match search.output() {
+                Ok(files) => {
+                    let output = String::from_utf8(files.stdout)
+                        .expect("invalid utf-8 in output of git show?");
+                    output
+                        .lines()
+                        .find(|f| {
+                            // the fs::read is to deal with rust-lang-nursery/rustc-perf#331
+                            f.starts_with("times/commit-")
+                                && f.ends_with("-x86_64-unknown-linux-gnu.json")
+                                && !fs::read(perf.join(f))
+                                    .map_err(|_| ())
+                                    .and_then(|s| String::from_utf8(s).map_err(|_| ()))
+                                    .map(|f| f.contains("2000-01-01T00:00:00+00:00"))
+                                    .unwrap_or(false)
+                        })
+                        .map(String::from)
+                }
+                Err(e2) => {
+                    error!(log, "could not parse new perf data: {}", e);
+                    error!(log, "could not find newest perf data either: {}", e2);
+                    return;
+                }
+            };
+
+            if let Some(file) = file {
+                match reduce(&perf.join(&file)) {
+                    Ok(p) => {
+                        assert_ne!(p.3, perf_old.3);
+                        info!(log, "fell back to most perf result in {}", file);
+                        p
+                    }
+                    Err(e2) => {
+                        error!(log, "could not parse new perf data: {}", e);
+                        error!(log, "could not find newest perf data either: {}", e2);
+                        return;
+                    }
+                }
+            } else {
+                error!(log, "could not parse new perf data: {}", e);
+                error!(log, "and there is no newer perf result");
+                return;
+            }
         }
     };
 
     debug!(log, "comparing old perf results";
            "ref" => &perf_old.0,
-           "date" => perf_old.1.map(|v| format!("{}", v)));
+           "date" => format!("{}", perf_old.1));
     debug!(log, "with new perf results";
            "ref" => &perf_new.0,
-           "date" => perf_new.1.map(|v| format!("{}", v)));
+           "date" => format!("{}", perf_new.1));
 
     // keep track of full revision hash
     old.rust.revision = perf_old.0.unwrap();
