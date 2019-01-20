@@ -1,18 +1,15 @@
 #[macro_use]
-extern crate clap;
-#[macro_use]
 extern crate slog;
 
+use std::collections::HashMap;
 use std::env;
 use std::fmt;
-use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::thread;
 use std::time;
 
 use chrono::prelude::*;
-use clap::{App, Arg};
+use clap::{crate_version, App, Arg};
 use egg_mode::tweet::DraftTweet;
 
 const CONSUMER_KEY: &'static str = "XurcamcbIvruiowuIuLLxpkEV";
@@ -95,25 +92,8 @@ fn main() {
 
     // initialize perf data repository
     let perf = Path::new("./.sunrise-perf-data");
-    if !perf.exists() {
-        info!(log, "cloning perf repository");
-        let url = "https://github.com/rust-lang-nursery/rustc-timing.git";
-        match Command::new("git")
-            .args(&["clone", url, &*perf.to_string_lossy()])
-            .status()
-        {
-            Ok(ref s) if s.success() => {}
-            Ok(ref s) => {
-                crit!(log, "failed to clone perf timing repository: {}", s);
-                return;
-            }
-            Err(e) => {
-                crit!(log, "failed to clone perf timing repository: {}", e);
-                return;
-            }
-        }
-    } else {
-        info!(log, "using existing perf repository clone");
+    if perf.exists() {
+        // TODO: remove perf
     }
 
     // and then we loop
@@ -122,7 +102,7 @@ fn main() {
             Ok(mut nightly) => {
                 // did nightly change?
                 if nightly.rust.revision != last.rust.revision {
-                    fill_perf(&log, perf, &mut nightly, &mut last);
+                    fill_perf(&log, &mut nightly, &mut last);
                     let tweet = new_nightly(&log, &nightly, &last);
                     last = nightly;
 
@@ -171,194 +151,133 @@ fn main() {
     }
 }
 
-fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old: &mut Nightly) {
-    // fetch any new timing results
-    match Command::new("git")
-        .args(&["-C", &*perf.to_string_lossy(), "fetch", "origin"])
-        .status()
-    {
-        Ok(ref s) if s.success() => {}
-        Ok(ref s) => {
-            error!(log, "failed to update perf timing repository: {}", s);
-            return;
-        }
-        Err(e) => {
-            error!(log, "failed to update perf timing repository: {}", e);
-            return;
-        }
-    }
-    // instead of git pull (which doesn't work with forced pushes), we do a fetch+reset
-    match Command::new("git")
-        .args(&[
-            "-C",
-            &*perf.to_string_lossy(),
-            "reset",
-            "--hard",
-            "origin/master",
-        ])
-        .status()
-    {
-        Ok(ref s) if s.success() => {}
-        Ok(ref s) => {
-            error!(log, "failed to update perf timing repository: {}", s);
-            return;
-        }
-        Err(e) => {
-            error!(log, "failed to update perf timing repository: {}", e);
-            return;
-        }
-    }
+fn find_perf_before(
+    log: &slog::Logger,
+    n: &mut Nightly,
+    stop_before: Option<&str>,
+) -> Option<(String, DateTime<Utc>, HashMap<String, f64>)> {
+    let bors_merge_commits = format!(
+        "https://api.github.com/repos/rust-lang/rust/commits?author=bors&sha={}",
+        n.rust.revision
+    );
+    let bors_merge_commits = reqwest::get(&bors_merge_commits)
+        .ok()?
+        .json::<serde_json::Value>()
+        .ok()?;
+    let bors_merge_commits = bors_merge_commits.as_array()?;
 
-    // find benchmark results of old one
-    let old_f = perf.join(format!(
-        "times/commit-{}*-x86_64-unknown-linux-gnu.json",
-        old.rust.revision
-    ));
-    let new_f = perf.join(format!(
-        "times/commit-{}*-x86_64-unknown-linux-gnu.json",
-        new.rust.revision
-    ));
+    for commit in bors_merge_commits {
+        // in reverse chronological order, staring with the target commit (n.rust.revision)
+        let commit = commit.as_object()?;
+        let sha = commit["sha"].as_str()?;
+        if sha.starts_with(&n.rust.revision) {
+            // keep track of the full revision hash
+            n.rust.revision = sha.to_owned();
+        }
+        let commit = commit["commit"].as_object()?;
 
-    let reduce = |f: &std::path::Path| -> Result<_, Box<std::error::Error>> {
-        use std::collections::HashMap;
-        let fname = glob::glob(&*f.to_string_lossy())?
-            .next()
-            .ok_or(format!("couldn't find file matching {:?}", f))??;
-        let f = std::fs::File::open(&fname)?;
-        let v: serde_json::Value = serde_json::from_reader(f)?;
-        let mut ts = HashMap::new();
-        let (commit, date) = match v.get("commit") {
-            Some(v) => (
-                v.get("sha").and_then(|v| v.as_str()).map(|v| v.to_owned()),
-                v.get("date")
-                    .and_then(|v| v.as_str())
-                    .and_then(|v| v.parse::<DateTime<Utc>>().ok()),
-            ),
-            None => (None, None),
-        };
-        match v.get("benchmarks") {
-            Some(b) => {
-                if !b.is_object() {
-                    Err("benchmarks not a map")?;
+        if let Some(stop) = stop_before {
+            // make sure we don't run further back that, say, previous nightly
+            if sha.starts_with(stop) {
+                break;
+            }
+        }
+
+        let message = commit["message"].as_str()?.lines().next()?;
+        if message.contains("r=try") {
+            // don't know if these would ever even appear here?
+            // but just to make sure...
+            continue;
+        }
+
+        // just for debugging really
+        let date = commit["committer"].as_object()?["date"]
+            .as_str()?
+            .parse::<DateTime<Utc>>()
+            .ok()?;
+
+        // see if we have a perf result for the current commit
+        let perf: serde_json::Value = match reqwest::get(&format!(
+            "https://raw.githubusercontent.com/\
+             rust-lang-nursery/rustc-timing/master/\
+             times/commit-{}-x86_64-unknown-linux-gnu.json",
+            sha
+        )) {
+            Ok(mut r) => r.json().ok()?,
+            Err(e) => {
+                if let Some(reqwest::StatusCode::NOT_FOUND) = e.status() {
+                    // move on to an earlier commit
+                    continue;
+                } else {
+                    // some other error? give up.
+                    error!(log, "GitHub API didn't like us: {:?}", e);
+                    return None;
                 }
-                for (benchmark, v) in b.as_object().unwrap() {
-                    let mut t = 0.0;
-                    let v = match v.get("Ok") {
-                        None => continue,
-                        Some(v) => v,
-                    };
-                    let v = v.get(0).unwrap_or(v);
-                    let v = match v.get("runs") {
-                        None => continue,
-                        Some(v) => v,
-                    };
-                    let v = match v.get(0) {
-                        None => continue,
-                        Some(v) => v,
-                    };
-                    let v = match v.get("stats") {
-                        None => continue,
-                        Some(v) => v,
-                    };
-                    let v = match v.as_array() {
-                        None => continue,
-                        Some(v) => v,
-                    };
-                    for v in v {
-                        match v.get("name") {
-                            Some(&serde_json::Value::String(ref s)) if s == "cpu-clock" => {
-                                if let Some(v) = v.get("cnt").and_then(|v| v.as_f64()) {
-                                    t += v;
-                                }
-                            }
-                            _ => continue,
+            }
+        };
+
+        let benchmarks = perf["benchmarks"].as_object()?;
+        let mut ts = HashMap::new();
+        for (benchmark, v) in benchmarks {
+            let mut t = 0.0;
+            let v = match v.get("Ok") {
+                None => continue,
+                Some(v) => v,
+            };
+            let v = v.get(0).unwrap_or(v);
+            let v = match v.get("runs") {
+                None => continue,
+                Some(v) => v,
+            };
+            let v = match v.get(0) {
+                None => continue,
+                Some(v) => v,
+            };
+            let v = match v.get("stats") {
+                None => continue,
+                Some(v) => v,
+            };
+            let v = match v.as_array() {
+                None => continue,
+                Some(v) => v,
+            };
+            for v in v {
+                match v.get("name") {
+                    Some(&serde_json::Value::String(ref s)) if s == "cpu-clock" => {
+                        if let Some(v) = v.get("cnt").and_then(|v| v.as_f64()) {
+                            t += v;
                         }
                     }
-                    ts.insert(benchmark.to_owned(), t);
+                    _ => continue,
                 }
             }
-            None => Err("no benchmark")?,
+            ts.insert(benchmark.to_owned(), t);
         }
-        match date {
-            Some(date) => Ok((commit, date, ts, fname)),
-            None => Err("no date stated")?,
-        }
-    };
 
-    let perf_old = match reduce(&old_f) {
-        Ok(p) => p,
-        Err(e) => {
-            error!(log, "could not parse old perf data: {}", e);
+        return Some((sha.to_owned(), date, ts));
+    }
+    None
+}
+
+fn fill_perf(log: &slog::Logger, new: &mut Nightly, old: &mut Nightly) {
+    let perf_old = match find_perf_before(log, old, None) {
+        Some(p) => p,
+        None => {
+            error!(
+                log,
+                "could not find old perf data for commit {}", old.rust.revision
+            );
             return;
         }
     };
-    let perf_new = match reduce(&new_f) {
-        Ok(p) => p,
-        Err(e) => {
-            // just pick the "latest" one instead.
-            // sadly, we can't rely on file creation/modification time, since git does not maintain
-            // that: https://stackoverflow.com/a/2458146/472927. instead, we walk the git log, and
-            // look for the most recent commit that added a file to `times/`
-            let old_date = format!("{}", perf_old.1);
-            let mut search = Command::new("git");
-            search
-                .arg("-C")
-                .arg(&perf)
-                .arg("show")
-                .arg("--name-only")
-                .arg("--grep")
-                .arg("success")
-                .arg("--since")
-                .arg(&old_date)
-                .arg("-n")
-                .arg("20")
-                .arg("--pretty=")
-                .arg("--")
-                .arg("times/commit-*-x86_64-unknown-linux-gnu.json");
-
-            let file = match search.output() {
-                Ok(files) => {
-                    let output = String::from_utf8(files.stdout)
-                        .expect("invalid utf-8 in output of git show?");
-                    output
-                        .lines()
-                        .find(|f| {
-                            // the fs::read is to deal with rust-lang-nursery/rustc-perf#331
-                            f.starts_with("times/commit-")
-                                && f.ends_with("-x86_64-unknown-linux-gnu.json")
-                                && !fs::read(perf.join(f))
-                                    .map_err(|_| ())
-                                    .and_then(|s| String::from_utf8(s).map_err(|_| ()))
-                                    .map(|f| f.contains("2000-01-01T00:00:00+00:00"))
-                                    .unwrap_or(false)
-                        })
-                        .map(String::from)
-                }
-                Err(e2) => {
-                    error!(log, "could not parse new perf data: {}", e);
-                    error!(log, "could not find newest perf data either: {}", e2);
-                    return;
-                }
-            };
-
-            if let Some(file) = file {
-                match reduce(&perf.join(&file)) {
-                    Ok(p) => {
-                        assert_ne!(p.3, perf_old.3);
-                        info!(log, "fell back to most perf result in {}", file);
-                        p
-                    }
-                    Err(e2) => {
-                        error!(log, "could not parse new perf data: {}", e);
-                        error!(log, "could not find newest perf data either: {}", e2);
-                        return;
-                    }
-                }
-            } else {
-                error!(log, "could not parse new perf data: {}", e);
-                error!(log, "and there is no newer perf result");
-                return;
-            }
+    let perf_new = match find_perf_before(log, new, Some(&old.rust.revision)) {
+        Some(p) => p,
+        None => {
+            error!(
+                log,
+                "could not find old perf data for commit {}", old.rust.revision
+            );
+            return;
         }
     };
 
@@ -368,10 +287,6 @@ fn fill_perf(log: &slog::Logger, perf: &std::path::Path, new: &mut Nightly, old:
     debug!(log, "with new perf results";
            "ref" => &perf_new.0,
            "date" => format!("{}", perf_new.1));
-
-    // keep track of full revision hash
-    old.rust.revision = perf_old.0.unwrap();
-    new.rust.revision = perf_new.0.unwrap();
 
     // we want to compute the average improvement in time
     let mut time_old = 0f64;
