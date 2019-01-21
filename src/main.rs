@@ -1,5 +1,7 @@
 #[macro_use]
 extern crate slog;
+#[macro_use]
+extern crate serde_derive;
 
 use std::collections::HashMap;
 use std::env;
@@ -38,32 +40,63 @@ fn main() {
         )
         .arg(
             Arg::with_name("RUSTV")
-                .help("Last rust nightly version string")
-                .required(true)
+                .help("Last rust nightly version string [read from .sunrise-last.toml otherwise]")
+                .requires("CARGOV")
                 .index(1),
         )
         .arg(
             Arg::with_name("CARGOV")
-                .help("Last cargo nightly version string")
-                .required(true)
+                .help("Last cargo nightly version string [read from .sunrise-last.toml otherwise]")
                 .index(2),
         )
         .get_matches();
 
     // what is current nightly?
-    let mut last = Nightly {
-        rust: Version::from_str(matches.value_of("RUSTV").unwrap()).unwrap(),
-        cargo: Version::from_str(matches.value_of("CARGOV").unwrap()).unwrap(),
-        perf: None,
+    let mut last = if matches.is_present("RUSTV") {
+        Nightly {
+            rust: Version::from_str(matches.value_of("RUSTV").unwrap()).unwrap(),
+            cargo: Version::from_str(matches.value_of("CARGOV").unwrap()).unwrap(),
+            perf: None,
+        }
+    } else {
+        let path = Path::new(".sunrise-last.toml");
+        if path.exists() {
+            match std::fs::read(path) {
+                Ok(last) => match toml::from_slice(&last) {
+                    Ok(last) => last,
+                    Err(e) => {
+                        error!(log, "invalid .sunrise-last.toml");
+                        eprintln!("{:?}", e);
+                        return;
+                    }
+                },
+                Err(e) => {
+                    error!(log, "could not read .sunrise-last.toml");
+                    eprintln!("{:?}", e);
+                    return;
+                }
+            }
+        } else {
+            info!(log, "no known last nightly -- assuming current is last");
+            match nightly() {
+                Ok(nightly) => nightly,
+                Err(e) => {
+                    error!(log, "could not discover current nightly");
+                    eprintln!("{:?}", e);
+                    return;
+                }
+            }
+        }
     };
+
     info!(log, "last rust nightly";
-          "version" => %last.rust.number,
-          "rev" => &last.rust.revision,
-          "date" => %last.rust.date);
+      "version" => %last.rust.number,
+      "rev" => &last.rust.revision,
+      "date" => %last.rust.date);
     info!(log, "last cargo nightly";
-          "version" => %last.cargo.number,
-          "rev" => &last.cargo.revision,
-          "date" => %last.cargo.date);
+      "version" => %last.cargo.number,
+      "rev" => &last.cargo.revision,
+      "date" => %last.cargo.date);
 
     let mut rt = tokio::runtime::current_thread::Runtime::new().unwrap();
     let twitter = if matches.is_present("dry") && env::var("CONSUMER_SECRET").is_err() {
@@ -124,10 +157,27 @@ fn main() {
                                 let draft = DraftTweet::new(&*tweet);
                                 if let Err(e) = rt.block_on(draft.send(&token)) {
                                     error!(log, "could not tweet: {}", e);
+                                    break;
+                                }
+
+                                info!(log, "saving last seen nightly to .sunrise-last.toml");
+                                match toml::ser::to_vec(&last) {
+                                    Ok(bytes) => {
+                                        if let Err(e) = std::fs::write(".sunrise-last.toml", &bytes)
+                                        {
+                                            warn!(log, "could not save latest nightly to disk");
+                                            eprintln!("{:?}", e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(log, "could not save latest nightly");
+                                        eprintln!("{:?}", e);
+                                    }
                                 }
                             }
                             chars => {
                                 error!(log, "tweet is too long"; "chars" => chars);
+                                break;
                             }
                         }
                     } else {
@@ -140,6 +190,7 @@ fn main() {
             }
             Err(e) => {
                 error!(log, "{}", e);
+                break;
             }
         }
 
@@ -426,6 +477,7 @@ fn nightly() -> Result<Nightly, ManifestError> {
     })
 }
 
+#[derive(Debug)]
 enum ManifestError {
     Unavailable(reqwest::Error),
     NotOk(reqwest::StatusCode),
@@ -444,6 +496,7 @@ impl fmt::Display for ManifestError {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct VersionNumber(usize, usize, usize);
 
 impl fmt::Display for VersionNumber {
@@ -452,10 +505,12 @@ impl fmt::Display for VersionNumber {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Version {
     number: VersionNumber,
     revision: String,
-    date: Date<Utc>,
+    // NOTE: needs to be a DateTime to be Serialize
+    date: DateTime<Utc>,
 }
 
 use std::str::FromStr;
@@ -480,11 +535,13 @@ impl FromStr for Version {
             date: Date::from_utc(
                 NaiveDate::parse_from_str(&matches[6], "%Y-%m-%d").unwrap(),
                 Utc,
-            ),
+            )
+            .and_hms(0, 0, 0),
         })
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct PerfChange {
     time: f64,
 }
@@ -501,6 +558,7 @@ impl fmt::Display for PerfChange {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Nightly {
     cargo: Version,
     rust: Version,
