@@ -101,7 +101,7 @@ fn main() {
         match nightly() {
             Ok(mut nightly) => {
                 // did nightly change?
-                if nightly.rust.revision != last.rust.revision {
+                if !last.rust.revision.starts_with(&nightly.rust.revision) {
                     fill_perf(&log, &mut nightly, &mut last);
                     let tweet = new_nightly(&log, &nightly, &last);
                     last = nightly;
