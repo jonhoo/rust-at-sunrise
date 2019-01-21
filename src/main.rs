@@ -123,12 +123,6 @@ fn main() {
         }
     };
 
-    // initialize perf data repository
-    let perf = Path::new("./.sunrise-perf-data");
-    if perf.exists() {
-        // TODO: remove perf
-    }
-
     // and then we loop
     loop {
         match nightly() {
