@@ -79,7 +79,24 @@ fn main() {
         } else {
             info!(log, "no known last nightly -- assuming current is last");
             match nightly() {
-                Ok(nightly) => nightly,
+                Ok(nightly) => {
+                    if !matches.is_present("dry") {
+                        info!(log, "saving discovered nightly to .sunrise-last.toml");
+                        match toml::ser::to_vec(&nightly) {
+                            Ok(bytes) => {
+                                if let Err(e) = std::fs::write(".sunrise-last.toml", &bytes) {
+                                    warn!(log, "could not save current nightly to disk");
+                                    eprintln!("{:?}", e);
+                                }
+                            }
+                            Err(e) => {
+                                warn!(log, "could not save current nightly");
+                                eprintln!("{:?}", e);
+                            }
+                        }
+                    }
+                    nightly
+                }
                 Err(e) => {
                     error!(log, "could not discover current nightly");
                     eprintln!("{:?}", e);
