@@ -165,13 +165,16 @@ fn find_perf_before(
         .json::<serde_json::Value>()
         .ok()?;
     let bors_merge_commits = bors_merge_commits.as_array()?;
+    debug!(log, "looking for perf results for {}", n.rust.revision);
 
     for commit in bors_merge_commits {
         // in reverse chronological order, staring with the target commit (n.rust.revision)
         let commit = commit.as_object()?;
         let sha = commit["sha"].as_str()?;
+        debug!(log, "checking commit {}", sha);
         if sha.starts_with(&n.rust.revision) {
             // keep track of the full revision hash
+            debug!(log, "expanded {} to {}", n.rust.revision, sha);
             n.rust.revision = sha.to_owned();
         }
         let commit = commit["commit"].as_object()?;
@@ -179,6 +182,7 @@ fn find_perf_before(
         if let Some(stop) = stop_before {
             // make sure we don't run further back that, say, previous nightly
             if sha.starts_with(stop) {
+                debug!(log, "stoppping at this commit as instructed");
                 break;
             }
         }
@@ -187,6 +191,7 @@ fn find_perf_before(
         if message.contains("r=try") {
             // don't know if these would ever even appear here?
             // but just to make sure...
+            warn!(log, "ignoring r=try commit");
             continue;
         }
 
@@ -207,6 +212,7 @@ fn find_perf_before(
             Err(e) => {
                 if let Some(reqwest::StatusCode::NOT_FOUND) = e.status() {
                     // move on to an earlier commit
+                    debug!(log, "commit has no perf results");
                     continue;
                 } else {
                     // some other error? give up.
