@@ -267,10 +267,16 @@ fn find_perf_before(
         let perf: serde_json::Value = match reqwest::get(&format!(
             "https://raw.githubusercontent.com/\
              rust-lang-nursery/rustc-timing/master/\
-             times/commit-{}-x86_64-unknown-linux-gnu.json",
+             times/commit-{}-x86_64-unknown-linux-gnu.json.sz",
             sha
         )) {
-            Ok(mut r) => r.json().ok()?,
+            Ok(r) => {
+                use std::io::Read;
+                let mut out = Vec::new();
+                let mut szip_reader = snap::Reader::new(r);
+                szip_reader.read_to_end(&mut out).ok()?;
+                serde_json::from_slice(&out).ok()?
+            }
             Err(e) => {
                 if let Some(reqwest::StatusCode::NOT_FOUND) = e.status() {
                     // move on to an earlier commit
@@ -287,36 +293,37 @@ fn find_perf_before(
         let benchmarks = perf["benchmarks"].as_object()?;
         let mut ts = HashMap::new();
         for (benchmark, v) in benchmarks {
-            let mut t = 0.0;
             let v = match v.get("Ok") {
                 None => continue,
                 Some(v) => v,
             };
             let v = v.get(0).unwrap_or(v);
-            let v = match v.get("runs") {
+            let runs = match v.get("runs").and_then(|v| v.as_array()) {
                 None => continue,
                 Some(v) => v,
             };
-            let v = match v.get(0) {
-                None => continue,
-                Some(v) => v,
-            };
-            let v = match v.get("stats") {
-                None => continue,
-                Some(v) => v,
-            };
-            let v = match v.as_array() {
-                None => continue,
-                Some(v) => v,
-            };
-            for v in v {
-                match v.get("name") {
-                    Some(&serde_json::Value::String(ref s)) if s == "cpu-clock" => {
-                        if let Some(v) = v.get("cnt").and_then(|v| v.as_f64()) {
-                            t += v;
-                        }
+
+            trace!(log, "collecting perf results for '{}' benchmark", benchmark);
+            let mut t = 0.0;
+            for run in runs {
+                let v = match run.get("stats") {
+                    None => continue,
+                    Some(v) => v,
+                };
+                // WHY?!
+                let v = match v.get("stats") {
+                    None => continue,
+                    Some(v) => v,
+                };
+                let v = match v.as_array() {
+                    None => continue,
+                    Some(v) => v,
+                };
+                // [9] is cpu-clock: https://github.com/rust-lang-nursery/rustc-perf/blob/31b65db74e034d7e82c6aa9a0c1710170f0a1700/collector/src/lib.rs#L298
+                if let Some(&serde_json::Value::Number(ref n)) = v.get(9) {
+                    if let Some(v) = n.as_f64() {
+                        t += v;
                     }
-                    _ => continue,
                 }
             }
             ts.insert(benchmark.to_owned(), t);
