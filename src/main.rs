@@ -397,10 +397,7 @@ fn new_nightly(log: &slog::Logger, new: &Nightly, old: &Nightly) -> String {
         "https://github.com/rust-lang/rust/compare/{}...{}",
         old.rust.revision, new.rust.revision
     );
-    let mut desc = format!(
-        "{} @rustlang nightly is up 🎉\n",
-        new.rust.date.naive_utc()
-    );
+    let mut desc = format!("{} @rustlang nightly is up 🎉\n", new.rust.date.naive_utc());
     desc.push_str(&format!("rust 🔬: {}", changes));
 
     // did cargo also change?
