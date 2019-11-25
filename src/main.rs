@@ -201,7 +201,7 @@ fn main() {
             }
             Err(e) => {
                 error!(log, "{}", e);
-                break;
+                // try again later -- manifest shouldn't generally be broken
             }
         }
 
