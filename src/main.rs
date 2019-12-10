@@ -266,7 +266,7 @@ fn find_perf_before(
         // see if we have a perf result for the current commit
         let perf: serde_json::Value = match reqwest::get(&format!(
             "https://raw.githubusercontent.com/\
-             rust-lang-nursery/rustc-timing/master/\
+             rust-lang/rustc-timing/master/\
              times/commit-{}-x86_64-unknown-linux-gnu.json.sz",
             sha
         )) {
@@ -319,7 +319,7 @@ fn find_perf_before(
                     None => continue,
                     Some(v) => v,
                 };
-                // [9] is cpu-clock: https://github.com/rust-lang-nursery/rustc-perf/blob/31b65db74e034d7e82c6aa9a0c1710170f0a1700/collector/src/lib.rs#L298
+                // [9] is cpu-clock: https://github.com/rust-lang/rustc-perf/blob/31b65db74e034d7e82c6aa9a0c1710170f0a1700/collector/src/lib.rs#L298
                 if let Some(&serde_json::Value::Number(ref n)) = v.get(9) {
                     if let Some(v) = n.as_f64() {
                         t += v;
