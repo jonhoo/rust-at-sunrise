@@ -1,22 +1,22 @@
 [package]
 name = "sunrise"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Jon Gjengset <jon@thesquareplanet.com>"]
 edition = "2018"
 
 [dependencies]
 egg-mode = "0.15"
 reqwest = { version = "0.10", features = ["json"] }
-tokio = { version = "0.2", features = ["rt-threaded", "time", "net", "macros"] }
+tokio = { version = "0.2", features = ["rt-threaded", "time", "net", "macros", "io-util"] }
 regex = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 serde = "1.0.0"
 serde_derive = "1.0.0"
 toml = "0.5.0"
+rmp-serde = "0.14"
 slog = "2.2"
 slog-term = "2.4"
 slog-async = "2.3"
-snap = "1"
 clap = "2.24.2"
 serde_json = "1.0.2"
 glob = "0.3"

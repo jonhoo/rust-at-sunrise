@@ -3,7 +3,6 @@ extern crate slog;
 #[macro_use]
 extern crate serde_derive;
 
-use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::path::Path;
@@ -20,13 +19,6 @@ const NIGHTLY_MANIFEST: &'static str =
 
 #[tokio::main]
 async fn main() {
-    // we want to log things
-    use slog::Drain;
-    let decorator = slog_term::TermDecorator::new().build();
-    let drain = slog_term::FullFormat::new(decorator).build().fuse();
-    let drain = slog_async::Async::new(drain).build().fuse();
-    let log = slog::Logger::root(drain, o!());
-
     // argument parsing
     let matches = App::new("Rust at Sunrise")
         .version(crate_version!())
@@ -50,6 +42,13 @@ async fn main() {
                 .index(2),
         )
         .get_matches();
+
+    // we want to log things
+    use slog::Drain;
+    let decorator = slog_term::TermDecorator::new().build();
+    let drain = slog_term::FullFormat::new(decorator).build().fuse();
+    let drain = slog_async::Async::new(drain).build().fuse();
+    let log = slog::Logger::root(drain, o!());
 
     // what is current nightly?
     let mut last = if matches.is_present("RUSTV") {
@@ -213,142 +212,53 @@ async fn main() {
     }
 }
 
-async fn find_perf_before(
+async fn expand_sha(
+    client: &reqwest::Client,
     log: &slog::Logger,
     n: &mut Nightly,
-    stop_before: Option<&str>,
-) -> Option<(String, DateTime<Utc>, HashMap<String, f64>)> {
+) -> Option<(String, DateTime<Utc>)> {
     let bors_merge_commits = format!(
-        "https://api.github.com/repos/rust-lang/rust/commits?author=bors&sha={}",
+        "https://api.github.com/repos/rust-lang/rust/commits?author=bors&per_page=1&sha={}",
         n.rust.revision
     );
-    let bors_merge_commits = reqwest::get(&bors_merge_commits)
-        .await
-        .ok()?
-        .json::<serde_json::Value>()
+    let bors_merge_commits = client
+        .get(&bors_merge_commits)
+        .header("User-Agent", "jonhoo-rust-at-sunrise")
+        .send()
         .await
         .ok()?;
-    let bors_merge_commits = bors_merge_commits.as_array()?;
-    debug!(log, "looking for perf results for {}", n.rust.revision);
-
-    for commit in bors_merge_commits {
-        // in reverse chronological order, staring with the target commit (n.rust.revision)
-        let commit = commit.as_object()?;
-        let sha = commit["sha"].as_str()?;
-        debug!(log, "checking commit {}", sha);
-        if sha.starts_with(&n.rust.revision) {
-            // keep track of the full revision hash
-            debug!(log, "expanded {} to {}", n.rust.revision, sha);
-            n.rust.revision = sha.to_owned();
-        }
-        let commit = commit["commit"].as_object()?;
-
-        if let Some(stop) = stop_before {
-            // make sure we don't run further back that, say, previous nightly
-            if sha.starts_with(stop) {
-                debug!(log, "stoppping at this commit as instructed");
-                break;
-            }
-        }
-
-        let message = commit["message"].as_str()?.lines().next()?;
-        if message.contains("r=try") {
-            // don't know if these would ever even appear here?
-            // but just to make sure...
-            warn!(log, "ignoring r=try commit");
-            continue;
-        }
-
-        // just for debugging really
-        let date = commit["committer"].as_object()?["date"]
-            .as_str()?
-            .parse::<DateTime<Utc>>()
-            .ok()?;
-
-        // see if we have a perf result for the current commit
-        let perf: serde_json::Value = match reqwest::get(&format!(
-            "https://raw.githubusercontent.com/\
-             rust-lang/rustc-timing/master/\
-             times/commit-{}-x86_64-unknown-linux-gnu.json.sz",
-            sha
-        ))
+    let bors_merge_commits = bors_merge_commits
+        .json::<serde_json::Value>()
         .await
-        {
-            Ok(r) => {
-                let bytes = match r.bytes().await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        // move on to an earlier commit
-                        debug!(log, "could not fetch perf results for commit: {:?}", e);
-                        continue;
-                    }
-                };
-                use std::io::Read;
-                let mut out = Vec::new();
-                let mut szip_reader = snap::read::FrameDecoder::new(std::io::Cursor::new(bytes));
-                szip_reader.read_to_end(&mut out).ok()?;
-                serde_json::from_slice(&out).ok()?
-            }
-            Err(e) => {
-                if let Some(reqwest::StatusCode::NOT_FOUND) = e.status() {
-                    // move on to an earlier commit
-                    debug!(log, "commit has no perf results");
-                    continue;
-                } else {
-                    // some other error? give up.
-                    error!(log, "GitHub API didn't like us: {:?}", e);
-                    return None;
-                }
-            }
-        };
+        .unwrap();
+    let mut bors_merge_commits = bors_merge_commits.as_array()?.iter();
+    debug!(log, "looking for commit info for {}", n.rust.revision);
 
-        let benchmarks = perf["benchmarks"].as_object()?;
-        let mut ts = HashMap::new();
-        for (benchmark, v) in benchmarks {
-            let v = match v.get("Ok") {
-                None => continue,
-                Some(v) => v,
-            };
-            let v = v.get(0).unwrap_or(v);
-            let runs = match v.get("runs").and_then(|v| v.as_array()) {
-                None => continue,
-                Some(v) => v,
-            };
+    let commit = bors_merge_commits.next()?;
+    let commit = commit.as_object()?;
+    let sha = commit["sha"].as_str()?;
+    debug!(log, "found commit {}", sha);
+    assert!(sha.starts_with(&n.rust.revision));
 
-            trace!(log, "collecting perf results for '{}' benchmark", benchmark);
-            let mut t = 0.0;
-            for run in runs {
-                let v = match run.get("stats") {
-                    None => continue,
-                    Some(v) => v,
-                };
-                // WHY?!
-                let v = match v.get("stats") {
-                    None => continue,
-                    Some(v) => v,
-                };
-                let v = match v.as_array() {
-                    None => continue,
-                    Some(v) => v,
-                };
-                // [9] is cpu-clock: https://github.com/rust-lang/rustc-perf/blob/31b65db74e034d7e82c6aa9a0c1710170f0a1700/collector/src/lib.rs#L298
-                if let Some(&serde_json::Value::Number(ref n)) = v.get(9) {
-                    if let Some(v) = n.as_f64() {
-                        t += v;
-                    }
-                }
-            }
-            ts.insert(benchmark.to_owned(), t);
-        }
+    // keep track of the full revision hash
+    debug!(log, "expanded {} to {}", n.rust.revision, sha);
+    n.rust.revision = sha.to_owned();
+    let commit = commit["commit"].as_object()?;
 
-        return Some((sha.to_owned(), date, ts));
-    }
-    None
+    // just for debugging really
+    let _message = commit["message"].as_str()?.lines().next()?;
+    let date = commit["committer"].as_object()?["date"]
+        .as_str()?
+        .parse::<DateTime<Utc>>()
+        .ok()?;
+
+    Some((sha.to_string(), date))
 }
 
 async fn fill_perf(log: &slog::Logger, new: &mut Nightly, old: &mut Nightly) {
-    let perf_old = match find_perf_before(log, old, None).await {
-        Some(p) => p,
+    let client = reqwest::Client::new();
+    let (old_sha, old_date) = match expand_sha(&client, log, old).await {
+        Some(r) => r,
         None => {
             error!(
                 log,
@@ -357,51 +267,155 @@ async fn fill_perf(log: &slog::Logger, new: &mut Nightly, old: &mut Nightly) {
             return;
         }
     };
-    let perf_new = match find_perf_before(log, new, Some(&old.rust.revision)).await {
-        Some(p) => p,
+    let (new_sha, new_date) = match expand_sha(&client, log, new).await {
+        Some(r) => r,
         None => {
             error!(
                 log,
                 "could not find old perf data for commit {}", old.rust.revision
             );
             return;
+        }
+    };
+
+    // see if we have a perf result for the current commit
+    let mut desc = serde_json::Map::default();
+    desc.insert("start".into(), old_sha.clone().into());
+    desc.insert("end".into(), new_sha.clone().into());
+    desc.insert("stat".into(), "cpu-clock".into());
+    let timing = client
+        .post("https://perf.rust-lang.org/perf/get")
+        .json(&desc);
+    let perf = timing
+        .header("User-Agent", "jonhoo-rust-at-sunrise")
+        .send()
+        .await;
+    let perf: serde_json::Value = match perf {
+        Ok(r) => {
+            let bytes = match r.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    // move on to an earlier commit
+                    debug!(log, "could not fetch perf results for commit: {:?}", e);
+                    return;
+                }
+            };
+
+            if let Some(j) = rmp_serde::from_read_ref(&bytes).ok() {
+                j
+            } else {
+                return;
+            }
+        }
+        Err(e) => {
+            if let Some(reqwest::StatusCode::NOT_FOUND) = e.status() {
+                warn!(log, "commits do not have perf results");
+                return;
+            } else {
+                error!(log, "GitHub API didn't like us: {:?}", e);
+                return;
+            }
         }
     };
 
     debug!(log, "comparing old perf results";
-           "ref" => &perf_old.0,
-           "date" => format!("{}", perf_old.1));
+           "ref" => &old_sha,
+           "date" => format!("{}", old_date));
     debug!(log, "with new perf results";
-           "ref" => &perf_new.0,
-           "date" => format!("{}", perf_new.1));
+           "ref" => &new_sha,
+           "date" => format!("{}", new_date));
 
-    // we want to compute the average improvement in time
-    let mut time_old = 0f64;
-    let mut time_new = 0f64;
-    let mut time_imp = 0f64;
-    let mut n = 0;
-    for (benchmark, ntime) in perf_new.2 {
-        if ntime == 0.0 {
+    let get = |ab: &str| -> Option<&serde_json::Map<String, serde_json::Value>> {
+        let commit = perf.get(ab)?.as_object()?;
+        commit.get("data")?.as_object()
+    };
+    let (perf_old, perf_new) = if let (Some(a), Some(b)) = (get("a"), get("b")) {
+        (a, b)
+    } else {
+        error!(log, "failed to extract commit perf data");
+        return;
+    };
+
+    // each of perf_old and perf_new holds the absolute measurement values for multiple experiments
+    // run on commit a and b respectively. we want to average the _percentage_ change across _all_
+    // metrics. it's not great, but it's concise. we'll link to the actual compare page for
+    // details.
+
+    let mut pct_chgs = Vec::new();
+    for (benchmark, results) in perf_old {
+        debug!(log, "found benchmark"; "benchmark" => benchmark);
+        let in_new = if let Some(b) = perf_new.get(benchmark) {
+            b
+        } else {
+            // not in new, so we can't really compare
+            debug!(log, "benchmark in old but not new");
             continue;
-        }
-        if let Some(&otime) = perf_old.2.get(&benchmark) {
-            if otime != 0.0 {
-                time_old += otime;
-                time_new += ntime;
-                time_imp += (ntime - otime) / otime;
-                n += 1;
+        };
+
+        let (results, in_new) = if let (Some(a), Some(b)) = (results.as_array(), in_new.as_array())
+        {
+            (a, b)
+        } else {
+            debug!(log, "benchmark results aren't JSON arrays");
+            continue;
+        };
+
+        for measurement in results {
+            if !measurement.is_array() {
+                debug!(log, "benchmark measurement isn't a JSON array");
+                continue;
             }
+            let measurement = measurement.as_array().unwrap();
+            if measurement.len() != 2 {
+                debug!(log, "benchmark measurement structure changed");
+                continue;
+            }
+            let (measurement, old_cost) = (&measurement[0], &measurement[1]);
+            if !measurement.is_string() || !old_cost.is_f64() {
+                debug!(log, "benchmark measurement fields changed");
+                continue;
+            }
+            let measurement = measurement.as_str().unwrap();
+            let old_cost = old_cost.as_f64().unwrap();
+
+            trace!(log, "found measurement"; "measurement" => measurement);
+            let new_measurement = if let Some(m) = in_new.iter().find(|m| {
+                if !m.is_array() {
+                    return false;
+                }
+                let m = m.as_array().unwrap();
+                m.len() == 2
+                    && m[0].is_string()
+                    && m[1].is_f64()
+                    && m[0].as_str().unwrap() == measurement
+            }) {
+                m
+            } else {
+                // not in new, so we can't really compare
+                debug!(log, "measurement in old but not new");
+                continue;
+            };
+            let new_cost = new_measurement[1].as_f64().unwrap();
+
+            // https://github.com/rust-lang/rustc-perf/blob/566e4d2f7728928c7c2d8ee0ae2633bc842e7273/site/static/compare.html#L92
+            let percent_chg = 100.0 * (new_cost - old_cost) / old_cost;
+            trace!(log, "computed change"; "change" => percent_chg);
+            pct_chgs.push(percent_chg);
         }
     }
 
-    time_imp *= 100f64;
-    time_imp /= n as f64;
-    info!(log, "perf improvements";
-          "change" => format!("{:.1}%", time_imp),
-          "old" => format!("{:.1}", time_old),
-          "new" => format!("{:.1}", time_new));
+    if pct_chgs.is_empty() {
+        warn!(log, "found no comparable benchmarks between nightlies");
+    }
 
-    new.perf = Some(PerfChange { time: time_imp });
+    let mean = pct_chgs.iter().sum::<f64>() / pct_chgs.len() as f64;
+    let variance =
+        pct_chgs.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (pct_chgs.len() - 1) as f64;
+    info!(log, "perf change";
+        "percent" => format!("{:.1}%", mean),
+        "variance" => format!("{:.1}%", variance));
+
+    new.perf = Some(PerfChange { mean, variance });
 }
 
 /// Construct a tweet based on information about old and new nightly
@@ -579,17 +593,18 @@ impl FromStr for Version {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PerfChange {
-    time: f64,
+    mean: f64,
+    variance: f64,
 }
 
 impl fmt::Display for PerfChange {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        if self.time > 0f64 {
+        if self.mean > 0f64 {
             // positive means compile time went *up*
             // which means speed (⚡) went down
-            write!(f, "📉 {:.1}%", self.time)
+            write!(f, "📉 {:.1}%±{:.1}%", self.mean, self.variance)
         } else {
-            write!(f, "📈 {:.1}%", -self.time)
+            write!(f, "📈 {:.1}%±{:.1}%", -self.mean, self.variance)
         }
     }
 }
