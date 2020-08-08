@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::path::Path;
-use std::thread;
 use std::time;
 
 use chrono::prelude::*;
@@ -19,7 +18,8 @@ const ACCESS_TOKEN: &'static str = "864346480437469185-itNALA4j82KEdvYg8Mh1XLZoY
 const NIGHTLY_MANIFEST: &'static str =
     "https://static.rust-lang.org/dist/channel-rust-nightly.toml";
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // we want to log things
     use slog::Drain;
     let decorator = slog_term::TermDecorator::new().build();
@@ -78,7 +78,7 @@ fn main() {
             }
         } else {
             info!(log, "no known last nightly -- assuming current is last");
-            match nightly() {
+            match nightly().await {
                 Ok(nightly) => {
                     if !matches.is_present("dry") {
                         info!(log, "saving discovered nightly to .sunrise-last.toml");
@@ -115,7 +115,6 @@ fn main() {
       "rev" => &last.cargo.revision,
       "date" => %last.cargo.date);
 
-    let mut rt = tokio::runtime::current_thread::Runtime::new().unwrap();
     let twitter = if matches.is_present("dry") && env::var("CONSUMER_SECRET").is_err() {
         None
     } else {
@@ -130,7 +129,7 @@ fn main() {
             access: access_token,
         };
 
-        match rt.block_on(egg_mode::service::config(&token)) {
+        match egg_mode::service::config(&token).await {
             Ok(c) => Some((token, c)),
             Err(_) if matches.is_present("dry") => None,
             Err(e) => {
@@ -142,11 +141,11 @@ fn main() {
 
     // and then we loop
     loop {
-        match nightly() {
+        match nightly().await {
             Ok(mut nightly) => {
                 // did nightly change?
                 if !last.rust.revision.starts_with(&nightly.rust.revision) {
-                    fill_perf(&log, &mut nightly, &mut last);
+                    fill_perf(&log, &mut nightly, &mut last).await;
                     let tweet = new_nightly(&log, &nightly, &last);
                     last = nightly;
 
@@ -165,8 +164,8 @@ fn main() {
                                 info!(log, "tweeting"; "chars" => chars);
                                 println!("{}", tweet);
 
-                                let draft = DraftTweet::new(&*tweet);
-                                if let Err(e) = rt.block_on(draft.send(&token)) {
+                                let draft = DraftTweet::new(tweet.to_string());
+                                if let Err(e) = draft.send(&token).await {
                                     error!(log, "could not tweet: {}", e);
                                     break;
                                 }
@@ -209,11 +208,12 @@ fn main() {
             warn!(log, "exiting early since we're doing a dry run");
             break;
         }
-        thread::sleep(time::Duration::from_secs(30 * 60));
+
+        tokio::time::delay_for(time::Duration::from_secs(30 * 60)).await;
     }
 }
 
-fn find_perf_before(
+async fn find_perf_before(
     log: &slog::Logger,
     n: &mut Nightly,
     stop_before: Option<&str>,
@@ -223,8 +223,10 @@ fn find_perf_before(
         n.rust.revision
     );
     let bors_merge_commits = reqwest::get(&bors_merge_commits)
+        .await
         .ok()?
         .json::<serde_json::Value>()
+        .await
         .ok()?;
     let bors_merge_commits = bors_merge_commits.as_array()?;
     debug!(log, "looking for perf results for {}", n.rust.revision);
@@ -269,11 +271,21 @@ fn find_perf_before(
              rust-lang/rustc-timing/master/\
              times/commit-{}-x86_64-unknown-linux-gnu.json.sz",
             sha
-        )) {
+        ))
+        .await
+        {
             Ok(r) => {
+                let bytes = match r.bytes().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        // move on to an earlier commit
+                        debug!(log, "could not fetch perf results for commit: {:?}", e);
+                        continue;
+                    }
+                };
                 use std::io::Read;
                 let mut out = Vec::new();
-                let mut szip_reader = snap::Reader::new(r);
+                let mut szip_reader = snap::read::FrameDecoder::new(std::io::Cursor::new(bytes));
                 szip_reader.read_to_end(&mut out).ok()?;
                 serde_json::from_slice(&out).ok()?
             }
@@ -334,8 +346,8 @@ fn find_perf_before(
     None
 }
 
-fn fill_perf(log: &slog::Logger, new: &mut Nightly, old: &mut Nightly) {
-    let perf_old = match find_perf_before(log, old, None) {
+async fn fill_perf(log: &slog::Logger, new: &mut Nightly, old: &mut Nightly) {
+    let perf_old = match find_perf_before(log, old, None).await {
         Some(p) => p,
         None => {
             error!(
@@ -345,7 +357,7 @@ fn fill_perf(log: &slog::Logger, new: &mut Nightly, old: &mut Nightly) {
             return;
         }
     };
-    let perf_new = match find_perf_before(log, new, Some(&old.rust.revision)) {
+    let perf_new = match find_perf_before(log, new, Some(&old.rust.revision)).await {
         Some(p) => p,
         None => {
             error!(
@@ -436,8 +448,10 @@ fn new_nightly(log: &slog::Logger, new: &Nightly, old: &Nightly) -> String {
 }
 
 /// Fetch information about the latest Rust nightly
-fn nightly() -> Result<Nightly, ManifestError> {
-    let mut res = reqwest::get(NIGHTLY_MANIFEST).map_err(|e| ManifestError::Unavailable(e))?;
+async fn nightly() -> Result<Nightly, ManifestError> {
+    let res = reqwest::get(NIGHTLY_MANIFEST)
+        .await
+        .map_err(|e| ManifestError::Unavailable(e))?;
     if res.status() != reqwest::StatusCode::OK {
         return Err(ManifestError::NotOk(res.status()));
     }
@@ -445,6 +459,7 @@ fn nightly() -> Result<Nightly, ManifestError> {
     // reader
     let s = res
         .text()
+        .await
         .map_err(|_| ManifestError::BadManifest("invalid utf-8"))?;
 
     // parse
@@ -542,7 +557,10 @@ impl FromStr for Version {
             r"^(rustc |cargo )?(\d+)\.(\d+)\.(\d+)-nightly \(([0-9a-f]+) (\d{4}-\d{2}-\d{2})\)$",
         )
         .unwrap();
-        let matches = re.captures(s).ok_or(())?;
+        let matches = re
+            .captures(s)
+            .ok_or(())
+            .expect("are you sure you ran with +nightly ?");
         Ok(Version {
             number: VersionNumber(
                 usize::from_str(&matches[2]).unwrap(),
